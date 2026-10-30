@@ -16,8 +16,8 @@ namespace Worker
         {
             try
             {
-                var pgsql = OpenDbConnection("Server=db;Username=postgres;Password=postgres;");
-                var redisConn = OpenRedisConnection("redis");
+                var pgsql = OpenDbConnection(BuildDbConnectionString());
+                var redisConn = OpenRedisConnection();
                 var redis = redisConn.GetDatabase();
 
                 // Keep alive is not implemented in Npgsql yet. This workaround was recommended:
@@ -34,7 +34,7 @@ namespace Worker
                     // Reconnect redis if down
                     if (redisConn == null || !redisConn.IsConnected) {
                         Console.WriteLine("Reconnecting Redis");
-                        redisConn = OpenRedisConnection("redis");
+                        redisConn = OpenRedisConnection();
                         redis = redisConn.GetDatabase();
                     }
                     string json = redis.ListLeftPopAsync("votes").Result;
@@ -46,7 +46,7 @@ namespace Worker
                         if (!pgsql.State.Equals(System.Data.ConnectionState.Open))
                         {
                             Console.WriteLine("Reconnecting DB");
-                            pgsql = OpenDbConnection("Server=db;Username=postgres;Password=postgres;");
+                            pgsql = OpenDbConnection(BuildDbConnectionString());
                         }
                         else
                         { // Normal +1 vote requested
@@ -102,18 +102,65 @@ namespace Worker
             return connection;
         }
 
-        private static ConnectionMultiplexer OpenRedisConnection(string hostname)
+        private static string GetEnv(string name, string defaultValue)
         {
-            // Use IP address to workaround https://github.com/StackExchange/StackExchange.Redis/issues/410
-            var ipAddress = GetIp(hostname);
-            Console.WriteLine($"Found redis at {ipAddress}");
+            var value = Environment.GetEnvironmentVariable(name);
+            return string.IsNullOrEmpty(value) ? defaultValue : value;
+        }
+
+        private static bool GetEnvFlag(string name)
+        {
+            var value = GetEnv(name, "false").ToLowerInvariant();
+            return value == "1" || value == "true" || value == "yes";
+        }
+
+        private static string BuildDbConnectionString()
+        {
+            var builder = new NpgsqlConnectionStringBuilder
+            {
+                Host = GetEnv("POSTGRES_HOST", "db"),
+                Port = int.Parse(GetEnv("POSTGRES_PORT", "5432")),
+                Username = GetEnv("POSTGRES_USER", "postgres"),
+                Password = GetEnv("POSTGRES_PASSWORD", "postgres"),
+                Database = GetEnv("POSTGRES_DB", "postgres"),
+                SslMode = Enum.Parse<SslMode>(GetEnv("POSTGRES_SSLMODE", "Disable"), true)
+            };
+            return builder.ConnectionString;
+        }
+
+        private static ConnectionMultiplexer OpenRedisConnection()
+        {
+            var hostname = GetEnv("REDIS_HOST", "redis");
+            var port = int.Parse(GetEnv("REDIS_PORT", "6379"));
+            var useSsl = GetEnvFlag("REDIS_SSL");
+
+            var options = new ConfigurationOptions
+            {
+                Password = Environment.GetEnvironmentVariable("REDIS_PASSWORD"),
+                Ssl = useSsl,
+                AbortOnConnectFail = true
+            };
+
+            if (useSsl)
+            {
+                // TLS certificate validation needs the host name, not an IP address
+                options.EndPoints.Add(hostname, port);
+                options.SslHost = hostname;
+            }
+            else
+            {
+                // Use IP address to workaround https://github.com/StackExchange/StackExchange.Redis/issues/410
+                var ipAddress = GetIp(hostname);
+                Console.WriteLine($"Found redis at {ipAddress}");
+                options.EndPoints.Add(ipAddress, port);
+            }
 
             while (true)
             {
                 try
                 {
                     Console.Error.WriteLine("Connecting to redis");
-                    return ConnectionMultiplexer.Connect(ipAddress);
+                    return ConnectionMultiplexer.Connect(options);
                 }
                 catch (RedisConnectionException)
                 {
