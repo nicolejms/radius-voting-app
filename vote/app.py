@@ -21,10 +21,23 @@ gunicorn_error_logger = logging.getLogger('gunicorn.error')
 app.logger.handlers.extend(gunicorn_error_logger.handlers)
 app.logger.setLevel(logging.INFO)
 
+def connect_redis():
+    options = dict(host=redis_host, port=redis_port, password=redis_password,
+                   ssl=redis_ssl, socket_timeout=5)
+    client = Redis(db=0, **options)
+    try:
+        cluster_enabled = client.info('cluster').get('cluster_enabled')
+    except Exception:
+        cluster_enabled = False
+    if cluster_enabled:
+        # Managed Redis can use cluster mode, which needs a cluster-aware client
+        from redis.cluster import RedisCluster
+        return RedisCluster(**options)
+    return client
+
 def get_redis():
     if not hasattr(g, 'redis'):
-        g.redis = Redis(host=redis_host, port=redis_port, password=redis_password,
-                        ssl=redis_ssl, db=0, socket_timeout=5)
+        g.redis = connect_redis()
     return g.redis
 
 @app.route("/", methods=['POST','GET'])
